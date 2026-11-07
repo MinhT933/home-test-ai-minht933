@@ -13,3 +13,6 @@ __pycache__/
 logs/*
 data/articles/*
 !data/articles/.gitkeep
+.sync-state/
+sync-state*.json
+bootstrap-report*.json

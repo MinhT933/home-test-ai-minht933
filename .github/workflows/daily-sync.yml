@@ -1,0 +1,93 @@
+name: Daily knowledge-base sync
+
+on:
+  schedule:
+    # 02:00 UTC is 09:00 in Asia/Ho_Chi_Minh (UTC+7).
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: optibot-daily-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out worker source
+        uses: actions/checkout@v4
+
+      - name: Restore durable checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/sync-state:refs/remotes/origin/sync-state
+          mkdir -p .sync-state
+          git show origin/sync-state:sync-state.json > .sync-state/sync-state.json
+          test -s .sync-state/sync-state.json
+
+      - name: Build worker image
+        run: docker build --tag optibot-sync:${{ github.sha }} .
+
+      - name: Run one-shot synchronization
+        id: worker
+        shell: bash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FILE_SEARCH_STORE_NAME: ${{ secrets.GEMINI_FILE_SEARCH_STORE_NAME }}
+        run: |
+          set +e
+          docker run --rm \
+            --env GEMINI_API_KEY \
+            --env GEMINI_FILE_SEARCH_STORE_NAME \
+            --volume "$PWD/.sync-state:/state" \
+            optibot-sync:${{ github.sha }} \
+            --sync --max-pages 1 --state-file /state/sync-state.json \
+            2>&1 | tee daily-sync.log
+          worker_exit=${PIPESTATUS[0]}
+          echo "worker_exit=$worker_exit" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Persist successful checkpoint
+        if: steps.worker.outputs.worker_exit == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          state_worktree="$RUNNER_TEMP/sync-state"
+          git worktree add --detach "$state_worktree" origin/sync-state
+          cp .sync-state/sync-state.json "$state_worktree/sync-state.json"
+          cd "$state_worktree"
+          git switch --force-create sync-state
+          git add sync-state.json
+          if git diff --cached --quiet; then
+            echo "Checkpoint unchanged"
+          else
+            git commit -m "Update sync checkpoint for ${GITHUB_RUN_ID}"
+            git push origin HEAD:sync-state
+          fi
+
+      - name: Upload last-run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-sync-log-${{ github.run_id }}
+          path: daily-sync.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve worker exit status
+        if: always()
+        shell: bash
+        run: |
+          worker_exit="${{ steps.worker.outputs.worker_exit }}"
+          if [[ -z "$worker_exit" ]]; then
+            echo "Worker did not produce an exit code" >&2
+            exit 1
+          fi
+          exit "$worker_exit"
