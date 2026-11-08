@@ -71,6 +71,17 @@ def list_documents(client: Any, store_name: str) -> list[Any]:
     return list(client.file_search_stores.documents.list(parent=store_name))
 
 
+def print_store_documents(client: Any, store_name: str) -> None:
+    store = client.file_search_stores.get(name=store_name)
+    documents = list_documents(client, store_name)
+
+    print(f"Store ID: {store_name}")
+    print(f"Active document count: {store.active_documents_count}")
+    print(f"Total documents returned: {len(documents)}")
+    for number, document in enumerate(documents, start=1):
+        print(f"{number}. {document.display_name or document.name}")
+
+
 def upload_missing_articles(
     client: Any,
     store_name: str,
@@ -133,12 +144,17 @@ def upload_missing_articles(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["upload-missing"])
+    parser.add_argument("command", choices=["upload-missing", "list"])
     parser.add_argument("--directory", type=Path, default=ARTICLES_DIR)
     args = parser.parse_args(argv)
 
     store_name = configured_store_name()
-    summary = upload_missing_articles(create_client(), store_name, args.directory)
+    client = create_client()
+    if args.command == "list":
+        print_store_documents(client, store_name)
+        return
+
+    summary = upload_missing_articles(client, store_name, args.directory)
     print(f"Total local Markdown files: {summary.total}")
     print(f"Added: {summary.added}")
     print(f"Skipped: {summary.skipped}")
