@@ -9,10 +9,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Data and logs
+# Runtime logs and synchronization state
 logs/*
-data/articles/*
-!data/articles/.gitkeep
 .sync-state/
 sync-state*.json
 bootstrap-report*.json
