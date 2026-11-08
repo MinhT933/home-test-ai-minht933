@@ -18,7 +18,6 @@ Configure `.env` locally (never commit it):
 
 - `GEMINI_API_KEY`: Google Gemini Developer API key.
 - `GEMINI_FILE_SEARCH_STORE_NAME`: full existing resource name, for example `fileSearchStores/...`.
-- `OPENAI_API_KEY` and `OPENAI_VECTOR_STORE_ID`: optional legacy OpenAI integration.
 - `SYNC_STATE_PATH`: optional path to a checkpoint manifest. Live deployments require durable storage; an unmounted local JSON file does not survive container replacement.
 
 ## Ingestion and demo

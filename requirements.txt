@@ -1,7 +1,6 @@
 requests
 beautifulsoup4
 markdownify
-openai
 python-dotenv
 google-genai
 pytest
