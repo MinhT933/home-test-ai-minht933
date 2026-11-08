@@ -17,4 +17,4 @@ COPY --chown=worker:worker main.py ./main.py
 USER worker
 
 ENTRYPOINT ["python", "main.py"]
-CMD ["--help"]
+CMD ["--sync", "--state-file", "/state/sync-state.json"]

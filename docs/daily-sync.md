@@ -14,14 +14,16 @@ docker run --rm \
   --env GEMINI_API_KEY \
   --env GEMINI_FILE_SEARCH_STORE_NAME \
   --volume "$PWD/.sync-state:/state" \
-  optibot-sync:local \
-  --dry-run --max-pages 1 --state-file /state/sync-state.json
+  optibot-sync:local
 ```
 
-`--max-pages 1` deliberately limits the take-home job to the current Zendesk
-page (30 articles) plus the separately retained YouTube document. An unrestricted
-dry-run currently discovers hundreds of additional articles and is not suitable
-for the first 30-minute scheduled run. Expanding scope must be a reviewed change.
+The image defaults to one full `--sync` run and follows every Zendesk API page.
+Use `--dry-run --state-file /state/sync-state.json` after the image name when a
+read-only delta preview is needed.
+
+The scheduled job allows up to 120 minutes so the first unrestricted run can
+index the articles beyond the original 31-document sample. Later delta runs
+normally upload only new or changed content.
 
 Never place `.env` or a checkpoint inside the image. A local manifest survives
 container restart only when `/state` is mounted from durable host storage. It

@@ -14,7 +14,7 @@ def test_container_is_non_root_one_shot_worker():
     assert "PYTHONUNBUFFERED=1" in dockerfile
     assert "USER worker" in dockerfile
     assert 'ENTRYPOINT ["python", "main.py"]' in dockerfile
-    assert 'CMD ["--help"]' in dockerfile
+    assert 'CMD ["--sync", "--state-file", "/state/sync-state.json"]' in dockerfile
     assert "COPY . ." not in dockerfile
 
 
@@ -80,6 +80,7 @@ def test_workflow_schedule_secrets_artifact_and_state_branch():
     assert "actions/upload-artifact@v4" in workflow
     assert "if: always()" in workflow
     assert "worker_exit=${PIPESTATUS[0]}" in workflow
-    assert "--sync --max-pages 1 --state-file /state/sync-state.json" in workflow
+    assert "--max-pages" not in workflow
+    assert "optibot-sync:${{ github.sha }}" in workflow
     assert "git push origin HEAD:sync-state" in workflow
     assert "git push --force" not in workflow

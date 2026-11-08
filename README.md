@@ -28,7 +28,7 @@ python -m app.gemini_store upload-missing    # explicitly upload only missing ar
 python -m app.gemini_chat demo               # one grounded YouTube-question demo
 ```
 
-The existing Gemini Store contains **31 indexed documents**. The scheduled worker intentionally uses `--max-pages 1`, so each daily run processes only the first **30 Zendesk articles**; the separately indexed YouTube article remains the 31st document. Uploads and synchronization compare stable Zendesk article IDs to avoid duplicates.
+The repository includes **31 sample Markdown documents**, including the YouTube article used by the grounded demo. Each scheduled run follows every Zendesk API page and synchronizes the complete available corpus. Uploads and synchronization compare stable Zendesk article IDs and SHA-256 content hashes to avoid duplicates.
 
 Gemini File Search performs managed chunking and retrieval; this project does not invent a second local chunking scheme. Markdown headings, lists, links, tables, images, and code blocks preserve useful semantic boundaries before upload. The demo was configured and tested through **Google AI Studio Build with File Search**, not the standard Playground conversation interface.
 
@@ -41,8 +41,10 @@ docker build -t optibot-sync:local .
 docker run --rm optibot-sync:local --help
 docker run --rm --env GEMINI_API_KEY --env GEMINI_FILE_SEARCH_STORE_NAME \
   --volume "$PWD/.sync-state:/state" optibot-sync:local \
-  --dry-run --max-pages 1 --state-file /state/sync-state.json
+  --dry-run --state-file /state/sync-state.json
 ```
+
+With a verified checkpoint mounted at `/state/sync-state.json`, running the image without command arguments performs one full synchronization and exits with the worker status.
 
 GitHub Actions runs the one-shot Docker worker daily at `02:00 UTC` (`09:00 Asia/Ho_Chi_Minh`). It restores the verified checkpoint from the dedicated `sync-state` branch, serializes runs with concurrency protection, persists state only after success, uploads a sanitized log artifact, and propagates the worker exit code. Repository secrets provide the Gemini credentials.
 

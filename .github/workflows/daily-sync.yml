@@ -16,7 +16,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     steps:
       - name: Check out worker source
         uses: actions/checkout@v4
@@ -46,7 +46,6 @@ jobs:
             --env GEMINI_FILE_SEARCH_STORE_NAME \
             --volume "$PWD/.sync-state:/state" \
             optibot-sync:${{ github.sha }} \
-            --sync --max-pages 1 --state-file /state/sync-state.json \
             2>&1 | tee daily-sync.log
           worker_exit=${PIPESTATUS[0]}
           echo "worker_exit=$worker_exit" >> "$GITHUB_OUTPUT"
