@@ -48,5 +48,4 @@ docker run --rm --env GEMINI_API_KEY --env GEMINI_FILE_SEARCH_STORE_NAME \
 GitHub Actions runs the one-shot Docker worker daily at `02:00 UTC` (`09:00 Asia/Ho_Chi_Minh`). It restores the verified checkpoint from the dedicated `sync-state` branch, serializes runs with concurrency protection, persists state only after success, uploads a sanitized log artifact, and propagates the worker exit code. Repository secrets provide the Gemini credentials.
 
 - [Successful public workflow run (42370095789)](https://github.com/MinhT933/home-test-ai-minht933/actions/runs/42370095789): `added=0`, `updated=0`, `skipped=30`, `failed=0`, exit code `0`.
-- [Sanitized durable run summary](docs/last-run.md)
 - [Daily sync and legacy bootstrap details](docs/daily-sync.md)
