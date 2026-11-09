@@ -3,7 +3,7 @@ name: Daily knowledge-base sync
 on:
   schedule:
     # 02:00 UTC is 09:00 in Asia/Ho_Chi_Minh (UTC+7).
-    - cron: "0 2 * * *"
+    - cron: "17 2 * * *"
   workflow_dispatch:
 
 permissions:
