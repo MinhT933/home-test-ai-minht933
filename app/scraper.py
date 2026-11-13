@@ -198,7 +198,7 @@ def _valid_article(article: Any) -> bool:
     )
 
 
-def fetch_articles(max_pages: int | None = None) -> list[Path]:
+def fetch_articles(max_pages: int | None = None, strict: bool = False) -> list[Path]:
     """Fetch and save all available pages."""
 
     if max_pages is not None and max_pages < 1:
@@ -248,6 +248,9 @@ def fetch_articles(max_pages: int | None = None) -> list[Path]:
                 saved_paths.append(path)
 
                 print(f"Saved: {path.name}")
+
+            elif strict:
+                raise RuntimeError("Zendesk returned an invalid article; refusing partial source input")
 
         next_page = data.get("next_page")
 

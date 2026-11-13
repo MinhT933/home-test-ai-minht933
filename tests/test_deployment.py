@@ -36,6 +36,16 @@ def test_missing_checkpoint_fails_closed_before_api_client(monkeypatch, tmp_path
     create_client.assert_not_called()
 
 
+def test_corrupt_checkpoint_fails_before_gemini_client(monkeypatch, tmp_path):
+    state = tmp_path / "corrupt.json"
+    state.write_text("{broken", encoding="utf-8")
+    create_client = Mock()
+    monkeypatch.setattr(worker_main, "create_client", create_client)
+
+    assert worker_main.main(["--sync", "--state-file", str(state)]) == 2
+    create_client.assert_not_called()
+
+
 def test_successful_sync_returns_zero(monkeypatch, tmp_path):
     state = tmp_path / "state.json"
     state.write_text("{}\n", encoding="utf-8")
@@ -48,7 +58,7 @@ def test_successful_sync_returns_zero(monkeypatch, tmp_path):
     monkeypatch.setattr(worker_main, "synchronize", sync)
 
     assert worker_main.main(["--sync", "--state-file", str(state)]) == 0
-    fetch.assert_called_once_with(max_pages=None)
+    fetch.assert_called_once_with(max_pages=None, strict=True)
     assert sync.call_args.kwargs["dry_run"] is False
 
 
@@ -70,7 +80,8 @@ def test_failed_sync_returns_nonzero(monkeypatch, tmp_path):
 
 def test_workflow_schedule_secrets_artifact_and_state_branch():
     workflow = (ROOT / ".github/workflows/daily-sync.yml").read_text(encoding="utf-8")
-    assert 'cron: "0 2 * * *"' in workflow
+    # The documented 09:17 Vietnam schedule is 02:17 UTC.
+    assert 'cron: "17 2 * * *"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "secrets.GEMINI_API_KEY" in workflow
@@ -82,5 +93,9 @@ def test_workflow_schedule_secrets_artifact_and_state_branch():
     assert "worker_exit=${PIPESTATUS[0]}" in workflow
     assert "--max-pages" not in workflow
     assert "optibot-sync:${{ github.sha }}" in workflow
-    assert "git push origin HEAD:sync-state" in workflow
+    assert "tools/persist_sync_state.py" in workflow
+    assert "--prepare-history" in workflow
+    assert "--checkpoint-persisted" in workflow
+    assert "ALLOW_PARTIAL_SUCCESS: ${{ vars.ALLOW_PARTIAL_SUCCESS || 'false' }}" in workflow
+    assert "include-hidden-files: true" in workflow
     assert "git push --force" not in workflow

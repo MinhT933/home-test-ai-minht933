@@ -39,6 +39,26 @@ jobs:
             > .sync-state/sync-state.json
 
           test -s .sync-state/sync-state.json
+          cp .sync-state/sync-state.json .sync-state/base-sync-state.json
+
+          history_path=$(git ls-tree --name-only origin/sync-state -- failure-streaks.json)
+          if [[ -n "$history_path" ]]; then
+            git show origin/sync-state:failure-streaks.json \
+              > .sync-state/failure-streaks.json
+          else
+            printf '{}\n' > .sync-state/failure-streaks.json
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from app.checkpoint import read_checkpoint
+          from tools.persist_sync_state import history
+
+          read_checkpoint(Path('.sync-state/sync-state.json'))
+          history(json.loads(Path('.sync-state/failure-streaks.json').read_text()))
+          print('Checkpoint and failure history validated')
+          PY
 
       # 3. FIX: Allow Docker worker (UID 10001) to write checkpoint
       - name: Grant worker access to checkpoint
@@ -105,6 +125,9 @@ jobs:
             --env GEMINI_FILE_SEARCH_STORE_NAME \
             --volume "$PWD/.sync-state:/state" \
             optibot-sync:${{ github.sha }} \
+            --sync \
+            --state-file /state/sync-state.json \
+            --report-file /state/worker-report.json \
             2>&1 | tee daily-sync.log
 
           worker_exit=${PIPESTATUS[0]}
@@ -113,62 +136,103 @@ jobs:
 
           exit 0
 
-      # 7. Persist checkpoint only after successful synchronization
-      - name: Persist successful checkpoint
-        if: steps.worker.outputs.worker_exit == '0'
+      # 7. Persist verified articles even if another article failed.
+      - name: Persist verified checkpoint and failure history
+        id: persist
+        if: steps.worker.outputs.worker_exit != ''
         shell: bash
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          test -s .sync-state/worker-report.json
 
-          state_worktree="$RUNNER_TEMP/sync-state"
+          docker run --rm \
+            --volume "$PWD/.sync-state:/state" \
+            --entrypoint python \
+            optibot-sync:${{ github.sha }} \
+            tools/finalize_sync_report.py \
+            --worker-report /state/worker-report.json \
+            --prior-streaks /state/failure-streaks.json \
+            --prepare-history \
+            --output /state/next-failure-streaks.json
 
-          git worktree add \
-            --detach \
-            "$state_worktree" \
-            origin/sync-state
+          python3 tools/persist_sync_state.py \
+            --base .sync-state/base-sync-state.json \
+            --local .sync-state/sync-state.json \
+            --prior-history .sync-state/failure-streaks.json \
+            --next-history .sync-state/next-failure-streaks.json
 
-          cp .sync-state/sync-state.json \
-            "$state_worktree/sync-state.json"
+          echo 'persisted=true' >> "$GITHUB_OUTPUT"
 
-          cd "$state_worktree"
-
-          git switch --force-create sync-state
-
-          git add sync-state.json
-
-          if git diff --cached --quiet; then
-            echo "Checkpoint unchanged"
-          else
-            git commit \
-              -m "Update sync checkpoint for ${GITHUB_RUN_ID}"
-
-            git push origin HEAD:sync-state
+      # 8. Report the business outcome after persistence is known.
+      - name: Finalize sync report
+        id: final
+        if: always()
+        shell: bash
+        env:
+          ALLOW_PARTIAL_SUCCESS: ${{ vars.ALLOW_PARTIAL_SUCCESS || 'false' }}
+          MAX_FAILED_ARTICLES: ${{ vars.MAX_FAILED_ARTICLES || '1' }}
+          MAX_FAILED_PERCENT: ${{ vars.MAX_FAILED_PERCENT || '1' }}
+          MAX_CONSECUTIVE_FAILURES: ${{ vars.MAX_CONSECUTIVE_FAILURES || '2' }}
+        run: |
+          if [[ ! -s .sync-state/worker-report.json ]]; then
+            echo '## Daily sync: FAILED' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Worker did not produce a complete report.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'final_exit=1' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-      # 8. Upload logs even if synchronization fails
-      - name: Upload last-run log
+          args=(
+            tools/finalize_sync_report.py
+            --worker-report /state/worker-report.json
+            --prior-streaks /state/failure-streaks.json
+            --summary-file /state/step-summary.md
+            --output /state/final-report.json
+          )
+          if [[ '${{ steps.persist.outputs.persisted }}' == 'true' ]]; then
+            args+=(--checkpoint-persisted)
+          fi
+
+          set +e
+          docker run --rm \
+            --env ALLOW_PARTIAL_SUCCESS \
+            --env MAX_FAILED_ARTICLES \
+            --env MAX_FAILED_PERCENT \
+            --env MAX_CONSECUTIVE_FAILURES \
+            --volume "$PWD/.sync-state:/state" \
+            --entrypoint python \
+            optibot-sync:${{ github.sha }} \
+            "${args[@]}"
+          final_exit=$?
+          set -e
+
+          if [[ -s .sync-state/step-summary.md ]]; then
+            cat .sync-state/step-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "final_exit=$final_exit" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      # 9. Upload logs and JSON report even if synchronization fails.
+      - name: Upload last-run artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-sync-log-${{ github.run_id }}
-          path: daily-sync.log
+          name: daily-sync-${{ github.run_id }}
+          path: |
+            daily-sync.log
+            .sync-state/final-report.json
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 14
 
-      # 9. Propagate worker exit code
-      - name: Preserve worker exit status
+      # 10. Preserve the final policy decision, including persistence failures.
+      - name: Preserve sync outcome
         if: always()
         shell: bash
         run: |
-          worker_exit="${{ steps.worker.outputs.worker_exit }}"
-
-          if [[ -z "$worker_exit" ]]; then
-            echo "Worker did not produce an exit code" >&2
+          final_exit="${{ steps.final.outputs.final_exit }}"
+          if [[ -z "$final_exit" ]]; then
+            echo "Final report did not produce an exit code" >&2
             exit 1
           fi
-
-          exit "$worker_exit"
+          exit "$final_exit"

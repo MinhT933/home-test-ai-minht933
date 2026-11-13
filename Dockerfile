@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=worker:worker app ./app
 COPY --chown=worker:worker main.py ./main.py
+COPY --chown=worker:worker tools/finalize_sync_report.py ./tools/finalize_sync_report.py
 
 USER worker
 

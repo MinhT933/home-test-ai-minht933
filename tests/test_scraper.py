@@ -81,3 +81,13 @@ def test_fetch_articles_skips_invalid_entries(monkeypatch, tmp_path):
         scraper, "save_article", lambda item: real_save_article(item, tmp_path)
     )
     assert [path.name for path in scraper.fetch_articles()] == ["3.md"]
+
+
+def test_strict_fetch_rejects_invalid_source_before_sync(monkeypatch):
+    monkeypatch.setattr(
+        scraper.requests,
+        "get",
+        Mock(return_value=response({"articles": [{}, article(3)], "next_page": None})),
+    )
+    with pytest.raises(RuntimeError, match="invalid article"):
+        scraper.fetch_articles(strict=True)
