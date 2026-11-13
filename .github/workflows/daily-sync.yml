@@ -156,6 +156,11 @@ jobs:
             --prepare-history \
             --output /state/next-failure-streaks.json
 
+          # Atomic replace creates new files with mode 0600. Give only the
+          # runner's group read access before host Python reads the checkpoint.
+          sudo chgrp -R "$(id -g)" .sync-state
+          sudo chmod -R g+rX .sync-state
+
           python3 tools/persist_sync_state.py \
             --base .sync-state/base-sync-state.json \
             --local .sync-state/sync-state.json \
@@ -206,13 +211,24 @@ jobs:
           final_exit=$?
           set -e
 
-          if [[ -s .sync-state/step-summary.md ]]; then
-            cat .sync-state/step-summary.md >> "$GITHUB_STEP_SUMMARY"
-          fi
           echo "final_exit=$final_exit" >> "$GITHUB_OUTPUT"
           exit 0
 
-      # 9. Upload logs and JSON report even if synchronization fails.
+      # 9. Docker may have atomically replaced final-report.json with mode 0600.
+      - name: Grant runner read access to sync artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d .sync-state ]]; then
+            sudo chgrp -R "$(id -g)" .sync-state
+            sudo chmod -R g+rX .sync-state
+            if [[ -s .sync-state/step-summary.md ]]; then
+              cat .sync-state/step-summary.md >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      # 10. Upload logs and JSON report even if synchronization fails.
       - name: Upload last-run artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -225,7 +241,7 @@ jobs:
           include-hidden-files: true
           retention-days: 14
 
-      # 10. Preserve the final policy decision, including persistence failures.
+      # 11. Preserve the final policy decision, including persistence failures.
       - name: Preserve sync outcome
         if: always()
         shell: bash
