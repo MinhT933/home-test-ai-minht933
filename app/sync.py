@@ -6,12 +6,19 @@ import os
 import re
 import tempfile
 import time
+import random
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 from google.genai import types
+from google.genai import errors as genai_errors
+
+try:
+    import httpx2 as sdk_http
+except ImportError:  # Older google-genai releases use httpx.
+    import httpx as sdk_http
 
 from app.gemini_store import article_id
 
@@ -168,6 +175,9 @@ class GeminiDocumentGateway:
         state = _document_state(document)
         if state != "ACTIVE":
             raise RuntimeError(f"Indexed document is not ACTIVE: {state or 'unknown'}")
+        metadata = _metadata(document)
+        if metadata.get("article_id") != article_id or metadata.get("content_hash") != digest:
+            raise RuntimeError("Indexed document metadata does not match upload")
         return RemoteDocument(name, article_id, digest, state, synced_at)
 
     def delete(self, document_name: str) -> None:
@@ -181,7 +191,87 @@ class SyncSummary:
     skipped: int = 0
     failed: int = 0
     total_processed: int = 0
-    failures: list[dict[str, str]] = field(default_factory=list)
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    articles: list[dict[str, Any]] = field(default_factory=list)
+
+
+MAX_UPLOAD_RETRIES = 3
+RETRYABLE_UPLOAD_CODES = {429, 500, 502, 503, 504}
+
+
+class UploadFailure(RuntimeError):
+    def __init__(self, error: Exception, attempts: int, unsafe: bool = False):
+        self.error = error
+        self.attempts = attempts
+        self.unsafe = unsafe
+        super().__init__(safe_error(error))
+
+
+def safe_error(error: Exception) -> str:
+    """Keep actionable error information without logging SDK response bodies."""
+    if isinstance(error, genai_errors.APIError):
+        message = "Upload has already been terminated" if "Upload has already been terminated" in str(error.message) else ""
+        return f"{type(error).__name__} HTTP {error.code}" + (f": {message}" if message else "")
+    if str(error) in {"remote upload outcome is ambiguous", "remote upload outcome is not ACTIVE"}:
+        return str(error)
+    return type(error).__name__
+
+
+def retryable_upload_error(error: Exception) -> bool:
+    if isinstance(error, genai_errors.APIError):
+        return error.code in RETRYABLE_UPLOAD_CODES
+    return isinstance(error, (TimeoutError, ConnectionError,
+                              sdk_http.TimeoutException, sdk_http.NetworkError))
+
+
+def terminated_upload(error: Exception) -> bool:
+    return (isinstance(error, genai_errors.APIError)
+            and error.code == 400
+            and "Upload has already been terminated" in str(error.message))
+
+
+def _matching_after_error(
+    gateway: DocumentGateway, stable_id: str, digest: str
+) -> RemoteDocument | None:
+    """Fail closed when the remote outcome could be ambiguous."""
+    documents = [doc for doc in gateway.list_documents() if doc.article_id == stable_id]
+    matching = [doc for doc in documents if doc.content_hash == digest and doc.state == "ACTIVE"]
+    if len(matching) > 1 or any(doc.content_hash is None for doc in documents):
+        raise RuntimeError("remote upload outcome is ambiguous")
+    if any(doc.content_hash == digest and doc.state != "ACTIVE" for doc in documents):
+        raise RuntimeError("remote upload outcome is not ACTIVE")
+    return matching[0] if matching else None
+
+
+def upload_with_retry(
+    gateway: DocumentGateway, path: Path, stable_id: str, digest: str,
+    synced_at: str, sleep=None,
+) -> tuple[RemoteDocument, int]:
+    sleep = sleep or time.sleep
+    for retry_count in range(MAX_UPLOAD_RETRIES + 1):
+        try:
+            return gateway.upload(path, stable_id, digest, synced_at), retry_count
+        except Exception as error:
+            try:
+                recovered = _matching_after_error(gateway, stable_id, digest)
+            except Exception as verification_error:
+                raise UploadFailure(verification_error, retry_count + 1, unsafe=True) from error
+            if recovered:
+                return recovered, retry_count
+            if not retryable_upload_error(error) or retry_count == MAX_UPLOAD_RETRIES:
+                raise UploadFailure(error, retry_count + 1,
+                                    unsafe=terminated_upload(error)) from error
+            delay = min(2 ** retry_count, 8) + random.uniform(0, 0.5)
+            _log("upload_retry", article_id=stable_id, retry_count=retry_count + 1,
+                 error_type=type(error).__name__, delay_seconds=round(delay, 2))
+            sleep(delay)
+            try:
+                recovered = _matching_after_error(gateway, stable_id, digest)
+            except Exception as verification_error:
+                raise UploadFailure(verification_error, retry_count + 1, unsafe=True) from error
+            if recovered:
+                return recovered, retry_count + 1
+    raise AssertionError("upload retry loop exhausted")
 
 
 @dataclass(frozen=True)
@@ -314,6 +404,20 @@ def _log(event: str, **values: Any) -> None:
     print(json.dumps({"event": event, **values}, sort_keys=True))
 
 
+def _failed(summary: SyncSummary, stable_id: str | None, error: str,
+            error_type: str, attempts: int = 0, file: str | None = None,
+            critical: bool = False) -> None:
+    entry = {"article_id": stable_id or "", "error": error,
+             "error_type": error_type, "attempts": attempts,
+             "retry_count": max(0, attempts - 1), "critical": critical}
+    if file:
+        entry["file"] = file
+    summary.failed += 1
+    summary.failures.append(entry)
+    summary.articles.append({"article_id": stable_id or "", "status": "FAILED"})
+    _log("failed", **entry)
+
+
 def synchronize(
     paths: Iterable[Path],
     gateway: DocumentGateway,
@@ -332,9 +436,8 @@ def synchronize(
         stable_id = article_id(path.name)
         if stable_id is None or stable_id in seen:
             reason = "invalid or duplicate local article ID"
-            summary.failed += 1
-            summary.failures.append({"file": path.name, "error": reason})
-            _log("failed", file=path.name, error=reason)
+            _failed(summary, stable_id, reason, "InvalidArticleId", file=path.name,
+                    critical=True)
             continue
         seen.add(stable_id)
         digest = content_hash(path.read_text(encoding="utf-8"))
@@ -344,26 +447,29 @@ def synchronize(
         matching = [doc for doc in documents if doc.content_hash == digest and doc.state == "ACTIVE"]
         ambiguous = [doc for doc in documents if doc.content_hash is None]
         if matching:
+            if len(matching) != 1:
+                _failed(summary, stable_id, "multiple verified documents require reconciliation", "DuplicateRemote")
+                continue
             stale = [doc for doc in documents if doc.name != matching[0].name]
             if stale and (ambiguous or any(doc.content_hash is None for doc in stale)):
                 reason = "ambiguous legacy duplicate requires explicit reconciliation"
-                summary.failed += 1
-                summary.failures.append({"article_id": stable_id, "error": reason})
-                _log("failed", article_id=stable_id, error=reason)
+                _failed(summary, stable_id, reason, "AmbiguousRemote")
                 continue
             if not dry_run:
                 try:
-                    for document in stale:
-                        gateway.delete(document.name)
                     state_store.put(
                         StateRecord(stable_id, digest, matching[0].name, matching[0].last_successful_sync or datetime.now(timezone.utc).isoformat())
                     )
                 except Exception as exc:
-                    summary.failed += 1
-                    summary.failures.append({"article_id": stable_id, "error": str(exc)})
-                    _log("failed", article_id=stable_id, error=str(exc))
+                    raise RuntimeError("checkpoint write failed") from exc
+                try:
+                    for document in stale:
+                        gateway.delete(document.name)
+                except Exception as exc:
+                    _failed(summary, stable_id, safe_error(exc), type(exc).__name__)
                     continue
             summary.skipped += 1
+            summary.articles.append({"article_id": stable_id, "status": "SKIPPED"})
             _log("skipped", article_id=stable_id, content_hash=digest)
             continue
 
@@ -375,6 +481,7 @@ def synchronize(
         )
         if reconciled_legacy:
             summary.skipped += 1
+            summary.articles.append({"article_id": stable_id, "status": "SKIPPED"})
             _log(
                 "skipped",
                 article_id=stable_id,
@@ -389,38 +496,47 @@ def synchronize(
             in {doc.name for doc in ambiguous if doc.state == "ACTIVE"}
         ):
             reason = "legacy document has no verified content hash; bootstrap reconciliation required"
-            summary.failed += 1
-            summary.failures.append({"article_id": stable_id, "error": reason})
-            _log("failed", article_id=stable_id, error=reason)
+            _failed(summary, stable_id, reason, "AmbiguousRemote")
             continue
 
         old_document = None
         if documents:
             if len(documents) != 1:
                 reason = "multiple remote documents with no current hash match"
-                summary.failed += 1
-                summary.failures.append({"article_id": stable_id, "error": reason})
-                _log("failed", article_id=stable_id, error=reason)
+                _failed(summary, stable_id, reason, "DuplicateRemote")
                 continue
             old_document = documents[0]
         action = "updated" if old_document else "added"
         if dry_run:
             setattr(summary, action, getattr(summary, action) + 1)
+            summary.articles.append({"article_id": stable_id, "status": "SUCCESS", "dry_run": True})
             _log(action, article_id=stable_id, content_hash=digest, dry_run=True)
             continue
 
         synced_at = datetime.now(timezone.utc).isoformat()
+        attempts = 0
         try:
-            new_document = gateway.upload(path, stable_id, digest, synced_at)
-            if old_document:
-                gateway.delete(old_document.name)
+            new_document, retry_count = upload_with_retry(gateway, path, stable_id, digest, synced_at)
+            attempts = retry_count + 1
+        except Exception as exc:
+            if isinstance(exc, UploadFailure):
+                _failed(summary, stable_id, str(exc), type(exc.error).__name__, exc.attempts,
+                        critical=exc.unsafe)
+            else:
+                _failed(summary, stable_id, safe_error(exc), type(exc).__name__, attempts)
+            continue
+        try:
             state_store.put(StateRecord(stable_id, digest, new_document.name, synced_at))
         except Exception as exc:
-            summary.failed += 1
-            summary.failures.append({"article_id": stable_id, "error": str(exc)})
-            _log("failed", article_id=stable_id, error=str(exc))
-            continue
+            raise RuntimeError("checkpoint write failed") from exc
+        if old_document:
+            try:
+                gateway.delete(old_document.name)
+            except Exception as exc:
+                _failed(summary, stable_id, safe_error(exc), type(exc).__name__, attempts)
+                continue
         setattr(summary, action, getattr(summary, action) + 1)
+        summary.articles.append({"article_id": stable_id, "status": "SUCCESS"})
         _log(action, article_id=stable_id, content_hash=digest, document_name=new_document.name)
 
     _log("summary", **asdict(summary))

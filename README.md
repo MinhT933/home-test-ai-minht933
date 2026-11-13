@@ -46,7 +46,9 @@ docker run --rm --env GEMINI_API_KEY --env GEMINI_FILE_SEARCH_STORE_NAME \
 
 With a verified checkpoint mounted at `/state/sync-state.json`, running the image without command arguments performs one full synchronization and exits with the worker status.
 
-GitHub Actions runs the one-shot Docker worker daily at `02:00 UTC` (`09:00 Asia/Ho_Chi_Minh`). It restores the verified checkpoint from the dedicated `sync-state` branch, serializes runs with concurrency protection, persists state only after success, uploads a sanitized log artifact, and propagates the worker exit code. Repository secrets provide the Gemini credentials.
+GitHub Actions runs the one-shot Docker worker daily at `02:17 UTC` (`09:17 Asia/Ho_Chi_Minh`). It restores the verified checkpoint from the dedicated `sync-state` branch and serializes runs. After the worker finishes, it persists verified article results and failure history even if some articles fail, then publishes a JSON report and step summary. Repository secrets provide the Gemini credentials.
+
+Partial success is disabled by default. Set the repository variable `ALLOW_PARTIAL_SUCCESS=true` to permit at most one noncritical failed article, up to 1% of the processed articles, for fewer than two consecutive runs. The variables `MAX_FAILED_ARTICLES`, `MAX_FAILED_PERCENT`, and `MAX_CONSECUTIVE_FAILURES` adjust those limits. A failed checkpoint push or an upload whose remote outcome cannot be verified still fails the workflow.
 
 - [Successful public workflow run (42370095789)](https://github.com/MinhT933/home-test-ai-minht933/actions/runs/42370095789): `added=0`, `updated=0`, `skipped=30`, `failed=0`, exit code `0`.
 - [Daily sync and legacy bootstrap details](docs/daily-sync.md)

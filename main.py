@@ -1,10 +1,13 @@
 """Command-line entry point for safe knowledge-base synchronization."""
 
 import argparse
+import json
 import os
 from pathlib import Path
+from dataclasses import asdict
 
 from app.gemini_store import configured_store_name, create_client
+from app.checkpoint import read_checkpoint
 from app.scraper import fetch_articles
 from app.sync import (
     GeminiDocumentGateway,
@@ -57,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
             "mounted/cloud-backed storage or replace the StateStore adapter."
         ),
     )
+    parser.add_argument("--report-file", type=Path,
+                        help="Write per-article worker results as JSON for a later durable finalizer.")
     parser.add_argument(
         "--acknowledge-verified-content",
         action="store_true",
@@ -91,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
     if (args.dry_run or args.sync) and not state_path.is_file():
         print(f"Checkpoint manifest is missing: {state_path}. Refusing empty-state sync.")
         return 2
+    if args.dry_run or args.sync:
+        try:
+            read_checkpoint(state_path)
+        except (OSError, ValueError) as exc:
+            print(f"Checkpoint manifest is invalid: {type(exc).__name__}")
+            return 2
 
     gateway = GeminiDocumentGateway(create_client(), configured_store_name())
     if args.bootstrap_report:
@@ -120,13 +131,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Bootstrap checkpoints committed: {count}")
         return 0
 
-    paths = fetch_articles(max_pages=args.max_pages)
+    paths = fetch_articles(max_pages=args.max_pages, strict=True)
     summary = synchronize(
         paths,
         gateway,
         JsonManifestStateStore(state_path),
         dry_run=args.dry_run,
     )
+    if args.report_file:
+        args.report_file.parent.mkdir(parents=True, exist_ok=True)
+        args.report_file.write_text(json.dumps(asdict(summary), indent=2, sort_keys=True) + "\n",
+                                    encoding="utf-8")
     return 1 if summary.failed else 0
 
 
